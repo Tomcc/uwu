@@ -1,14 +1,35 @@
-use std::net::UdpSocket;
-
 use clap::{App, AppSettings, SubCommand};
+use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream},
+    str::FromStr,
+    time::Duration,
+};
 
-const ADDR: &str = "127.0.0.1:38911";
 const UNITY_ADDR: &str = "127.0.0.1:38910";
 
-fn send_msg(msg: &str) -> anyhow::Result<()> {
-    UdpSocket::bind(ADDR)?.send_to(msg.as_bytes(), UNITY_ADDR)?;
+// very short timeout, this is supposed to be used over localhost
+const TIMEOUT: Duration = Duration::from_secs(5);
 
-    Ok(())
+fn send_msg(msg: &str) -> anyhow::Result<()> {
+    let addr = SocketAddr::from_str(UNITY_ADDR)?;
+
+    let mut stream = TcpStream::connect_timeout(&addr, TIMEOUT)?;
+
+    log::debug!("Connected to {}", stream.peer_addr()?);
+
+    // send the message
+    stream.write(msg.as_bytes())?;
+
+    // wait for an answer
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf)?;
+
+    if buf == "OK" {
+        Ok(())
+    } else {
+        Err(anyhow::format_err!("Unknown response received"))
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -19,17 +40,12 @@ fn main() -> anyhow::Result<()> {
         // .version("1.0")
         // .author("Kevin K. <kbknapp@gmail.com>")
         // .about("Does awesome things")
+        .subcommand(SubCommand::with_name("play").about("Start Play mode"))
+        .subcommand(SubCommand::with_name("stop").about("Stop current Play mode"))
+        .subcommand(SubCommand::with_name("refresh").about("Refresh all assets"))
         .subcommand(
-            SubCommand::with_name("play").about("Start Play mode"),
-        )
-        .subcommand(
-            SubCommand::with_name("stop").about("Stop current Play mode"),
-        )
-        .subcommand(
-            SubCommand::with_name("refresh").about("Refresh all assets"),
-        )
-        .subcommand(
-            SubCommand::with_name("build").about("Rebuild scripts. Only compatible with Unity 2019.3+"),
+            SubCommand::with_name("build")
+                .about("Rebuild scripts. Only compatible with Unity 2019.3+"),
         )
         .setting(AppSettings::ArgRequiredElseHelp);
 
@@ -37,15 +53,15 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(_matches) = matches.subcommand_matches("play") {
         send_msg("play")?;
-    }
-    else if let Some(_matches) = matches.subcommand_matches("stop") {
+    } else if let Some(_matches) = matches.subcommand_matches("stop") {
         send_msg("stop")?;
-    }
-    else if let Some(_matches) = matches.subcommand_matches("refresh") {
+    } else if let Some(_matches) = matches.subcommand_matches("refresh") {
         send_msg("refresh")?;
+    } else if let Some(_matches) = matches.subcommand_matches("build") {
+        send_msg("build")?;
     }
 
-    log::info!("Done!");
+    log::info!("Success!");
 
     Ok(())
 }

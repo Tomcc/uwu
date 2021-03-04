@@ -121,7 +121,7 @@ public static class UWUClient {
             server.Start();
 
             // Enter the listening loop.
-            Debug.Log("UWU: Started listening");
+            Log("UWU: Started listening");
             while (true) {
 
                 TcpClient client = server.AcceptTcpClient();
@@ -132,8 +132,11 @@ public static class UWUClient {
                     commandqueue.Enqueue(command);
                 }
             }
+        } catch (ThreadAbortException) {
+            // do nothing. Unity likes to terminate the thread for a number of reasons 
+            // and that's fine
         } catch (Exception e) {
-            Debug.Log(e.ToString());
+            Debug.LogError(e.ToString());
         }
     }
 

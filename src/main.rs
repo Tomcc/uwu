@@ -20,13 +20,16 @@ fn main() -> anyhow::Result<()> {
         // .author("Kevin K. <kbknapp@gmail.com>")
         // .about("Does awesome things")
         .subcommand(
-            SubCommand::with_name("play").about("Make any listening Editor start Play mode"),
+            SubCommand::with_name("play").about("Start Play mode"),
         )
         .subcommand(
             SubCommand::with_name("stop").about("Stop current Play mode"),
         )
         .subcommand(
-            SubCommand::with_name("refresh").about("Make any listening Editor refresh its assets, eg. rebuild code"),
+            SubCommand::with_name("refresh").about("Refresh all assets"),
+        )
+        .subcommand(
+            SubCommand::with_name("build").about("Rebuild scripts. Only compatible with Unity 2019.3+"),
         )
         .setting(AppSettings::ArgRequiredElseHelp);
 

@@ -9,11 +9,33 @@ using System.Text;
 using System.Threading;
 
 public static class UWUClient {
+    static void Log(string msg) {
+        // uncomment this for logging
+        // Debug.Log(msg);
+    }
+
     class Command {
+        enum CloseMode {
+            Success,
+            Fail,
+            ReconnectLater,
+        }
+
+        static string ModeString(CloseMode mode) {
+            switch (mode) {
+                case CloseMode.Success:
+                    return "OK";
+                case CloseMode.Fail:
+                    return "ERR";
+                case CloseMode.ReconnectLater:
+                    return "RECONNECT";
+            }
+            return "ERR";
+        }
+
         string cmd;
         TcpClient client;
         private bool done = false;
-        private bool pollAssetRefresh = false;
 
         public Command(TcpClient client) {
             this.client = client;
@@ -25,8 +47,8 @@ public static class UWUClient {
             cmd = System.Text.Encoding.ASCII.GetString(bytes, 0, read);
         }
 
-        void Close(bool success) {
-            string responseMsg = success ? "OK" : "ERR";
+        void Close(CloseMode mode) {
+            var responseMsg = ModeString(mode);
             byte[] msg = System.Text.Encoding.ASCII.GetBytes(responseMsg);
 
             client.GetStream().Write(msg, 0, msg.Length);
@@ -37,60 +59,50 @@ public static class UWUClient {
         }
 
         public bool isDone() {
-            if (done) {
-                return true;
-            }
-
-            if (pollAssetRefresh) {
-                var working = EditorApplication.isCompiling || EditorApplication.isUpdating;
-
-                if (!working) {
-                    Close(true);
-                    done = true;
-                }
-            }
-
             return done;
         }
 
         public void Execute() {
-            if (cmd == "play") {
-                Debug.Log("UWU: Received Play command, entering play mode");
-                EditorApplication.EnterPlaymode();
+            if (cmd == "confirm_restart") {
+                Log("UWU: Confirming alive");
+
+                Close(CloseMode.Success);
+            } else if (cmd == "play") {
+                Log("UWU: Received Play command, entering play mode");
+
                 if (!EditorApplication.isPlaying) {
-                    EditorApplication.playModeStateChanged += (PlayModeStateChange state) => {
-                        if (state == PlayModeStateChange.EnteredPlayMode) {
-                            Close(true);
-                        }
-                    };
-                } else {
-                    Close(true);
+                    Close(CloseMode.ReconnectLater);
+
+                    EditorApplication.EnterPlaymode();
                 }
             } else if (cmd == "stop") {
-                Debug.Log("UWU: Received Stop command, stopping play mode");
+                Log("UWU: Received Stop command, stopping play mode");
+
                 if (EditorApplication.isPlaying) {
                     EditorApplication.ExitPlaymode();
                     EditorApplication.playModeStateChanged += (PlayModeStateChange state) => {
                         if (state == PlayModeStateChange.EnteredEditMode) {
-                            Close(true);
+                            Close(CloseMode.Success);
                         }
                     };
                 } else {
-                    Close(true);
+                    Close(CloseMode.Success);
                 }
             } else if (cmd == "refresh") {
-                Debug.Log("UWU: Received asset refresh command");
+                Log("UWU: Received asset refresh command");
+
+                Close(CloseMode.ReconnectLater);
                 AssetDatabase.Refresh();
-                pollAssetRefresh = true;
             } else if (cmd == "build") {
-                Debug.Log("UWU: Received Script build command");
+                Log("UWU: Received Script build command");
+
                 UnityEditor.Compilation.CompilationPipeline.RequestScriptCompilation();
                 UnityEditor.Compilation.CompilationPipeline.compilationFinished += (object o) => {
-                    Close(true);
+                    Close(CloseMode.Success);
                 };
             } else {
                 Debug.LogError("Unknown remote command received '" + cmd + "'");
-                Close(false);
+                Close(CloseMode.Fail);
             }
         }
     }
@@ -126,6 +138,10 @@ public static class UWUClient {
     }
 
     private static void OnUpdate() {
+        if (EditorApplication.isCompiling || EditorApplication.isUpdating) {
+            return;
+        }
+
         if (currentCmd != null && !currentCmd.isDone()) {
             return;
         }

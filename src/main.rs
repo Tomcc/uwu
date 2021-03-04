@@ -3,32 +3,45 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     str::FromStr,
+    thread::sleep,
     time::Duration,
 };
 
 const UNITY_ADDR: &str = "127.0.0.1:38910";
 
 // very short timeout, this is supposed to be used over localhost
-const TIMEOUT: Duration = Duration::from_secs(5);
 
-fn send_msg(msg: &str) -> anyhow::Result<()> {
-    let addr = SocketAddr::from_str(UNITY_ADDR)?;
+fn send_msg(first_msg: &str) -> anyhow::Result<()> {
+    let mut timeout: Duration = Duration::from_secs(5);
+    let mut msg = first_msg;
 
-    let mut stream = TcpStream::connect_timeout(&addr, TIMEOUT)?;
+    loop {
+        let addr = SocketAddr::from_str(UNITY_ADDR)?;
 
-    log::debug!("Connected to {}", stream.peer_addr()?);
+        let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
 
-    // send the message
-    stream.write(msg.as_bytes())?;
+        log::debug!("Connected to {}", stream.peer_addr()?);
 
-    // wait for an answer
-    let mut buf = String::new();
-    stream.read_to_string(&mut buf)?;
+        // send the message
+        stream.write(msg.as_bytes())?;
 
-    if buf == "OK" {
-        Ok(())
-    } else {
-        Err(anyhow::format_err!("Unknown response received"))
+        // wait for an answer
+        let mut buf = String::new();
+        stream.read_to_string(&mut buf)?;
+
+        if buf == "OK" {
+            return Ok(());
+        } else if buf == "RECONNECT" || buf.is_empty() {
+            // don't return, loop and connect again with a larger timeout
+            timeout = Duration::from_secs(30);
+            msg = "confirm_restart";
+
+            sleep(Duration::from_secs(3));
+        } else if buf == "ERR" {
+            return Err(anyhow::format_err!("Something went wrong"));
+        } else {
+            return Err(anyhow::format_err!("Unknown response received: {}", buf));
+        }
     }
 }
 

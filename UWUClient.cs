@@ -1,5 +1,4 @@
-﻿using System.Collections;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 using UnityEditor;
 using System.Net.Sockets;
@@ -93,6 +92,16 @@ public static class UWUClient {
 
                 Close(CloseMode.ReconnectLater);
                 AssetDatabase.Refresh();
+            } else if (cmd == "background_refresh") {
+                Log("UWU: Received a background refresh command");
+
+                if (IsUnityEditorFocused()) {
+                    Close(CloseMode.Success);
+                }
+                else {
+                    Close(CloseMode.ReconnectLater);
+                    AssetDatabase.Refresh();
+                }
             } else if (cmd == "build") {
                 Log("UWU: Received Script build command");
 
@@ -110,6 +119,10 @@ public static class UWUClient {
     private static Thread thread;
     private static Queue<Command> commandqueue = new Queue<Command>();
     private static Command currentCmd = null;
+
+    public static bool IsUnityEditorFocused() {
+        return UnityEditorInternal.InternalEditorUtility.isApplicationActive;
+    }
 
     private static void RunClient() {
         try {

@@ -57,6 +57,17 @@ fn single_command(command: &str) -> anyhow::Result<()> {
     res
 }
 
+fn refresh() {
+    log::info!("Refreshing...");
+
+    if let Err(e) = send_msg("background_refresh") {
+        log::error!("An error occurred: {}", e);
+    }
+    else {
+        log::info!("Done")
+    }
+}
+
 fn watch(mut path: PathBuf, delay: Duration) -> anyhow::Result<()> {
     log::info!("Watching project at {}", path.display());
 
@@ -81,11 +92,11 @@ fn watch(mut path: PathBuf, delay: Duration) -> anyhow::Result<()> {
         match rx.recv()? {
             DebouncedEvent::NoticeWrite(_) => {}
             DebouncedEvent::NoticeRemove(_) => {}
-            DebouncedEvent::Create(_) => send_msg("refresh")?,
-            DebouncedEvent::Write(_) => send_msg("refresh")?,
+            DebouncedEvent::Create(_) => refresh(),
+            DebouncedEvent::Write(_) => refresh(),
             DebouncedEvent::Chmod(_) => {}
-            DebouncedEvent::Remove(_) => send_msg("refresh")?,
-            DebouncedEvent::Rename(_, _) => send_msg("refresh")?,
+            DebouncedEvent::Remove(_) => refresh(),
+            DebouncedEvent::Rename(_, _) => refresh(),
             DebouncedEvent::Rescan => {}
             DebouncedEvent::Error(e, _) => Err(e)?,
         }

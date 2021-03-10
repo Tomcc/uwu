@@ -1,4 +1,6 @@
-use clap::{App, AppSettings, Arg, SubCommand};
+use clap::{
+    crate_authors, crate_description, crate_name, crate_version, App, AppSettings, Arg, SubCommand,
+};
 use notify::{watcher, DebouncedEvent, RecursiveMode, Watcher};
 use std::{
     io::{Read, Write},
@@ -22,7 +24,7 @@ fn send_msg(first_msg: &str) -> anyhow::Result<()> {
 
         let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
 
-        log::debug!("Connected to {}", stream.peer_addr()?);
+        log::trace!("Connected to {}", stream.peer_addr()?);
 
         // send the message
         stream.write(msg.as_bytes())?;
@@ -58,13 +60,12 @@ fn single_command(command: &str) -> anyhow::Result<()> {
 }
 
 fn refresh() {
-    log::info!("Refreshing...");
+    log::debug!("Refreshing...");
 
     if let Err(e) = send_msg("background_refresh") {
         log::error!("An error occurred: {}", e);
-    }
-    else {
-        log::info!("Done")
+    } else {
+        log::debug!("Done")
     }
 }
 
@@ -104,13 +105,17 @@ fn watch(mut path: PathBuf, delay: Duration) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let log_env = env_logger::Env::new().default_filter_or("info");
-    env_logger::init_from_env(log_env);
-
-    let app = App::new("UWU - Unity Workflow for UDP")
-        // .version("1.0")
-        // .author("Kevin K. <kbknapp@gmail.com>")
-        // .about("Does awesome things")
+    let app = App::new(crate_name!())
+        .version(crate_version!())
+        .author(crate_authors!())
+        .about(crate_description!())
+        .arg(
+            Arg::with_name("verbose")
+                .help("Prints more log messages. Same as RUST_LOG=debug")
+                .short("v")
+                .long("verbose")
+                .takes_value(false),
+        )
         .subcommand(SubCommand::with_name("play").about("Start Play mode"))
         .subcommand(SubCommand::with_name("stop").about("Stop current Play mode"))
         .subcommand(SubCommand::with_name("refresh").about("Refresh all assets"))
@@ -137,9 +142,17 @@ fn main() -> anyhow::Result<()> {
                         .takes_value(true),
                 ),
         )
-        .setting(AppSettings::ArgRequiredElseHelp);
-
+        .setting(AppSettings::SubcommandRequiredElseHelp);
     let matches = app.get_matches();
+
+    let log_level = if matches.is_present("verbose") {
+        "debug"
+    } else {
+        "info"
+    };
+
+    let log_env = env_logger::Env::new().default_filter_or(log_level);
+    env_logger::init_from_env(log_env);
 
     if let Some(_matches) = matches.subcommand_matches("play") {
         single_command("play")?;

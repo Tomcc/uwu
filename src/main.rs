@@ -20,6 +20,9 @@ const UNITY_ADDR: Lazy<SocketAddr> =
 // very short timeout, this is supposed to be used over localhost
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+// time to wait between attempts
+const ATTEMPT_DELAY: Duration = Duration::from_secs(3);
+
 #[derive(Error, Debug)]
 enum UnitySocketError {
     #[error("Send IO error: {0}")]
@@ -28,17 +31,17 @@ enum UnitySocketError {
     #[error("UTF-8 error: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
 
-    #[error("Unity is responding with an empty string")]
-    Empty,
+    #[error("Unity responded with an empty string. This can happen when the Editor reloads the scripts.")]
+    ProbablyClientReloaded,
 
-    #[error("Unity failed to respond {0}")]
+    #[error("Unity recv error: {0}")]
     FailedToRecv(std::io::Error),
 
     #[error("Something went wrong on Unitys side")]
     UnityError,
 
     #[error("Unknown response received: {0}")]
-    UnknownResponse(String),
+    UnknownResponse(u8),
 
     #[error("Socket disconnected")]
     Disconnected,
@@ -60,18 +63,23 @@ impl UnitySocket {
             }
 
             // Try to connect
+            log::info!("Connecting to Unity at {}", UNITY_ADDR_STR);
             let res = TcpStream::connect_timeout(&*UNITY_ADDR, TIMEOUT);
 
             if let Ok(stream) = res {
+                log::info!("Connected!");
+
                 self.stream.replace(Some(stream));
                 return;
             }
 
-            sleep(Duration::from_secs(3));
+            log::warn!("Failed to connect to Unity, retrying soon");
+
+            sleep(ATTEMPT_DELAY);
         }
     }
 
-    fn try_send(&self, msg: &str) -> UnitySocketResult {
+    fn try_send_and_recv(&self, msg: &str) -> UnitySocketResult {
         let stream = self.stream.borrow_mut();
         let mut stream = match stream.as_ref() {
             Some(stream) => stream,
@@ -84,47 +92,49 @@ impl UnitySocket {
             .write(msg.as_bytes())
             .map_err(|e| UnitySocketError::FailedToSend(e))?;
 
-        let mut buf = String::new();
-        stream
-            .read_to_string(&mut buf)
-            .map_err(|e| UnitySocketError::FailedToRecv(e))?;
+        log::info!("Waiting for response...");
 
-        if buf == "OK" {
+        // receive one byte with the result
+        let mut buf = [0u8; 1];
+        if let Err(e) = stream.read_exact(&mut buf) {
+            // if ErrorKind is UnexpectedEof, the socket was closed by a restart
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Err(UnitySocketError::ProbablyClientReloaded);
+            }
+            return Err(UnitySocketError::FailedToRecv(e));
+        }
+
+        let status = buf[0];
+
+        log::info!("Received response: {}", status);
+
+        if status == 1 {
             Ok(())
-        } else if buf.is_empty() {
-            Err(UnitySocketError::Empty)
-        } else if buf == "ERR" {
+        // } else if status.is_empty() {
+        //     Err(UnitySocketError::ProbablyClientReloaded)
+        } else if status == 0 {
             Err(UnitySocketError::UnityError)
         } else {
-            Err(UnitySocketError::UnknownResponse(buf))
-        }
-    }
-
-    fn reconnect_loop_send(&self, msg: &str) -> anyhow::Result<()> {
-        loop {
-            self.reconnect_loop();
-
-            // handle some errors by breaking and reconnecting, otherwise return the error
-            match self.try_send(msg) {
-                Ok(()) => return Ok(()),
-                Err(UnitySocketError::Disconnected) => {}
-                Err(UnitySocketError::FailedToRecv(_)) => {}
-                Err(UnitySocketError::FailedToSend(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
+            Err(UnitySocketError::UnknownResponse(status))
         }
     }
 }
 
 fn single_command(command: &str) -> anyhow::Result<()> {
     let socket = UnitySocket::default();
-    let res = socket.reconnect_loop_send(command);
+    socket.reconnect_loop();
 
-    if res.is_ok() {
-        log::info!("Success!");
+    // try send once and log the error, if it's an error that's an actual problem here
+    match socket.try_send_and_recv(command) {
+        Ok(()) => {}
+        Err(UnitySocketError::Disconnected) => {}
+        Err(UnitySocketError::ProbablyClientReloaded) => {}
+        Err(e) => return Err(e.into()),
     }
 
-    res
+    log::info!("Success!");
+
+    Ok(())
 }
 
 fn watch(mut path: PathBuf, delay: Duration) -> anyhow::Result<()> {
@@ -151,10 +161,19 @@ fn watch(mut path: PathBuf, delay: Duration) -> anyhow::Result<()> {
     watcher.watch(path, RecursiveMode::Recursive)?;
 
     let refresh = || {
-        if let Err(e) = socket.try_send("background_refresh") {
-            log::error!("An error occurred: {}", e);
-        } else {
-            log::debug!("Done")
+        // handle some errors by breaking and reconnecting, otherwise return the error
+        match socket.try_send_and_recv("background_refresh") {
+            Ok(()) => log::info!("Refresh Done"),
+
+            // In this case, the message was probably received, but we need to reconnect
+            Err(UnitySocketError::Disconnected) | Err(UnitySocketError::ProbablyClientReloaded) => {
+                log::info!("Unity disconnected, reconnecting soon");
+                sleep(ATTEMPT_DELAY);
+
+                socket.reconnect_loop();
+            }
+
+            Err(e) => log::error!("An error occurred: {}", e),
         }
     };
 

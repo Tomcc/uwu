@@ -7,29 +7,17 @@ use once_cell::sync::Lazy;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    cell::RefCell,
-    io::{Read, Write},
-    net::{SocketAddr, TcpStream, UdpSocket},
+    net::{SocketAddr, UdpSocket},
     path::PathBuf,
     str::FromStr,
-    sync::atomic::AtomicI32,
-    thread::sleep,
     time::Duration,
 };
-use thiserror::Error;
 
 const UNITY_ADDR_STR: &str = "127.0.0.1:38910";
 const UNITY_ADDR: Lazy<SocketAddr> =
     Lazy::new(|| SocketAddr::from_str(UNITY_ADDR_STR).expect("Failed to parse UNITY_ADDR_STR"));
 // very short timeout, this is supposed to be used over localhost
 const TIMEOUT: Duration = Duration::from_secs(5);
-
-const RESPONSE_ACK: u8 = 0x61;
-const RESPONSE_ERROR: u8 = 0x45;
-const RESPONSE_OK: u8 = 0x4F;
-
-// time to wait between attempts
-const ATTEMPT_DELAY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Serialize)]
 enum Command {
@@ -38,7 +26,6 @@ enum Command {
     Refresh,
     BackgroundRefresh,
     Build,
-    Watch,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +49,8 @@ fn send_reliable_blocking(request: &Request) -> anyhow::Result<()> {
     socket.set_read_timeout(Some(TIMEOUT))?;
 
     let msg = serde_json::to_vec(request)?;
+
+    log::info!("Sending {}", String::from_utf8_lossy(&msg));
 
     // repeat until acknowledged
     let mut recv_buf = [0; 1024];

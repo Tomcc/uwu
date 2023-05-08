@@ -1,10 +1,12 @@
+mod id64;
+
 use anyhow::bail;
 use clap::{
     crate_authors, crate_description, crate_name, crate_version, App, AppSettings, Arg, SubCommand,
 };
+use id64::Id64;
 use notify::{watcher, DebouncedEvent, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     net::{SocketAddr, UdpSocket},
@@ -19,9 +21,13 @@ const UNITY_ADDR: Lazy<SocketAddr> =
 // very short timeout, this is supposed to be used over localhost
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+static SOCKET: Lazy<UdpSocket> =
+    Lazy::new(|| UdpSocket::bind("127.0.0.1:0").expect("Failed to bind to a random port"));
+
 #[derive(Debug, Serialize)]
 enum Command {
     Play,
+    CheckAlive,
     Stop,
     Refresh,
     BackgroundRefresh,
@@ -30,36 +36,34 @@ enum Command {
 
 #[derive(Debug, Serialize)]
 struct Request {
-    id: u32,
+    id: Id64,
     cmd: Command,
 }
 
 #[derive(Debug, Deserialize)]
 enum Response {
     Success,
-    Error(String),
+    Error,
     Wait,
 }
 
 // Send one message over UDP, and retry if it times out until ACK is received
 // This is needed because Unity may be recreating the socket, and the message could get lost
 fn send_reliable_blocking(request: &Request) -> anyhow::Result<()> {
-    // bind to a random local port and set the timeout
-    let socket = UdpSocket::bind("127.0.0.1:0")?;
-    socket.set_read_timeout(Some(TIMEOUT))?;
+    SOCKET.set_read_timeout(Some(TIMEOUT))?;
 
     let msg = serde_json::to_vec(request)?;
 
-    log::info!("Sending {}", String::from_utf8_lossy(&msg));
+    log::debug!("Sending {}", String::from_utf8_lossy(&msg));
 
     // repeat until acknowledged
     let mut recv_buf = [0; 1024];
     loop {
         // send the message
-        socket.send_to(&msg, &*UNITY_ADDR)?;
+        SOCKET.send_to(&msg, &*UNITY_ADDR)?;
 
         // receive the response
-        match socket.recv_from(&mut recv_buf) {
+        match SOCKET.recv_from(&mut recv_buf) {
             Ok((size, _src)) => {
                 // deserialize the response
                 let response: Response = serde_json::from_slice(&recv_buf[..size])?;
@@ -67,7 +71,7 @@ fn send_reliable_blocking(request: &Request) -> anyhow::Result<()> {
                 match response {
                     // Success means that we're done
                     Response::Success => {
-                        log::info!("Done");
+                        log::debug!("Response received");
                         return Ok(());
                     }
                     // Wait means that we should receive Success or Error later.
@@ -75,14 +79,14 @@ fn send_reliable_blocking(request: &Request) -> anyhow::Result<()> {
                     Response::Wait => {
                         break;
                     }
-                    Response::Error(e) => {
-                        return Err(anyhow::format_err!("Unity returned an error: {}", e));
+                    Response::Error => {
+                        bail!("Unity-side error");
                     }
                 }
             }
             Err(e) => match e.kind() {
                 std::io::ErrorKind::WouldBlock => {
-                    log::info!("No ACK received within timeout, retrying");
+                    log::debug!("No ACK received within timeout, retrying");
                 }
                 _ => {
                     return Err(e.into());
@@ -94,8 +98,8 @@ fn send_reliable_blocking(request: &Request) -> anyhow::Result<()> {
     log::info!("Waiting for Unity...");
 
     // wait for the final message
-    socket.set_read_timeout(None)?;
-    let (size, _src) = socket.recv_from(&mut recv_buf)?;
+    SOCKET.set_read_timeout(None)?;
+    let (size, _src) = SOCKET.recv_from(&mut recv_buf)?;
 
     // deserialize the response
     let response: Response = serde_json::from_slice(&recv_buf[..size])?;
@@ -103,11 +107,11 @@ fn send_reliable_blocking(request: &Request) -> anyhow::Result<()> {
     match response {
         // Success means that we're done
         Response::Success => {
-            log::info!("Done");
+            log::debug!("Final response received");
             return Ok(());
         }
-        Response::Error(e) => {
-            return Err(anyhow::format_err!("Unity returned an error: {}", e));
+        Response::Error => {
+            bail!("Unity-side error");
         }
         // Wait means that we should receive Success or Error later.
         // Break the loop and wait for the next message
@@ -120,7 +124,7 @@ fn send_reliable_blocking(request: &Request) -> anyhow::Result<()> {
 fn single_command(command: Command) -> anyhow::Result<()> {
     let req = Request {
         // pick a random ID so that the server can keep track of mistaken resends
-        id: rand::thread_rng().gen(),
+        id: Id64::random(),
         cmd: command,
     };
 
@@ -128,7 +132,7 @@ fn single_command(command: Command) -> anyhow::Result<()> {
 }
 
 fn watch(mut path: PathBuf, delay: Duration) -> anyhow::Result<()> {
-    log::info!("Watching project at {}", path.display());
+    println!("Watching project at {}", path.display());
 
     path.push("Assets");
 
@@ -147,11 +151,16 @@ fn watch(mut path: PathBuf, delay: Duration) -> anyhow::Result<()> {
     watcher.watch(path, RecursiveMode::Recursive)?;
 
     let refresh = || {
+        println!("Refreshing");
+
         // handle some errors by breaking and reconnecting, otherwise return the error
-        match single_command(Command::BackgroundRefresh) {
-            Ok(()) => log::info!("Refresh Done"),
-            Err(e) => log::error!("An error occurred: {}", e),
+        if let Err(e) = single_command(Command::BackgroundRefresh) {
+            log::error!("An error occurred: {}", e);
         }
+
+        // NOTE: this may kill the server if scripts are reloaded,
+        // but as it is a background operation, we don't need to wait until it restarts;
+        // we can just queue more refresh requests
     };
 
     loop {
@@ -221,13 +230,29 @@ fn main() -> anyhow::Result<()> {
     env_logger::init_from_env(log_env);
 
     if let Some(_matches) = matches.subcommand_matches("play") {
+        // Play is complex. First, we need to request to enter play mode, which will succeed
+        // immediately, but it will kill the Unity client, so it cannot return WAIT.
         single_command(Command::Play)?;
+
+        // Then, we need to wait until the Unity client has restarted and is ready to receive
+        single_command(Command::CheckAlive)?;
+
+        println!("ok");
     } else if let Some(_matches) = matches.subcommand_matches("stop") {
         single_command(Command::Stop)?;
+
+        println!("ok");
     } else if let Some(_matches) = matches.subcommand_matches("refresh") {
         single_command(Command::Refresh)?;
+
+        // same as Play, wait until our client is ready to receive
+        single_command(Command::CheckAlive)?;
+
+        println!("ok");
     } else if let Some(_matches) = matches.subcommand_matches("build") {
         single_command(Command::Build)?;
+
+        println!("ok");
     } else if let Some(matches) = matches.subcommand_matches("watch") {
         let path = matches
             .value_of("PROJECT_DIR")
